@@ -1,0 +1,784 @@
+--[[
+    ESP Library v2.0 — Improved & Optimized
+    Author: refactored build
+    Compatible: Luau / UNC executors
+--]]
+
+local espLibrary = {
+    instances  = {},
+    espCache   = {},
+    chamsCache = {},
+    objectCache= {},
+    conns      = {},
+    whitelist  = {},
+    blacklist  = {},
+    options    = {
+        enabled               = true,
+        -- scale / bounds
+        minScaleFactorX       = 1,   maxScaleFactorX       = 10,
+        minScaleFactorY       = 1,   maxScaleFactorY       = 10,
+        scaleFactorX          = 5,   scaleFactorY          = 6,
+        boundingBox           = false,
+        boundingBoxDescending = true,
+        excludedPartNames     = {},
+        -- fonts
+        font                  = 2,
+        fontSize              = 13,
+        -- filters
+        limitDistance         = false,
+        maxDistance           = 1000,
+        visibleOnly           = false,
+        teamCheck             = false,
+        teamColor             = false,
+        useCustomTeamColor    = false,
+        customTeamColor       = Color3.new(1,1,1),
+        fillColor             = nil,
+        whitelistColor        = Color3.new(0,1,0),
+        -- out-of-view arrows
+        outOfViewArrows              = true,
+        outOfViewArrowsFilled        = true,
+        outOfViewArrowsSize          = 25,
+        outOfViewArrowsRadius        = 150,
+        outOfViewArrowsColor         = Color3.new(1,1,1),
+        outOfViewArrowsTransparency  = 0.5,
+        outOfViewArrowsOutline       = true,
+        outOfViewArrowsOutlineFilled = false,
+        outOfViewArrowsOutlineColor  = Color3.new(0,0,0),
+        outOfViewArrowsOutlineTransp = 0,
+        -- names
+        names              = true,
+        nameTransparency   = 0,
+        nameColor          = Color3.new(1,1,1),
+        -- boxes
+        boxes              = true,
+        boxesTransparency  = 0,
+        boxesColor         = Color3.new(1,0,0),
+        cornerBox          = false,   -- new: L-corner style box
+        cornerBoxLength    = 6,
+        boxFill            = false,
+        boxFillTransparency= 0.5,
+        boxFillColor       = Color3.new(1,0,0),
+        -- health
+        healthBars         = true,
+        healthBarsSize     = 1,
+        healthBarsTransparency = 0,
+        healthGradient     = true,    -- new: green→yellow→red gradient
+        healthText         = true,
+        healthTextTransparency = 0,
+        healthTextSuffix   = "%",
+        healthTextColor    = Color3.new(1,1,1),
+        -- distance
+        distance           = true,
+        distanceTransparency = 0,
+        distanceSuffix     = " m",
+        distanceColor      = Color3.new(1,1,1),
+        -- tool
+        tool               = false,
+        toolTransparency   = 0,
+        toolColor          = Color3.new(1,1,0),
+        -- tracers
+        tracers            = false,
+        tracerTransparency = 0,
+        tracerColor        = Color3.new(1,1,1),
+        tracerOrigin       = "Bottom",  -- Mouse | Top | Bottom
+        -- chams
+        chams              = true,
+        chamsFillColor     = Color3.new(1,0,0),
+        chamsFillTransparency = 0.5,
+        chamsOutlineColor  = Color3.new(0,0,0),
+        chamsOutlineTransparency = 0,
+        -- skeleton
+        skeleton           = false,
+        skeletonColor      = Color3.new(1,1,1),
+        skeletonTransparency = 0,
+    }
+}
+espLibrary.__index = espLibrary
+
+-- ──────────────────────────────────────────────────────────────────────────────
+-- Locals — micro-opt: cache everything we touch in hot paths
+-- ──────────────────────────────────────────────────────────────────────────────
+local getService            = game.GetService
+local instanceNew           = Instance.new
+local drawingNew            = Drawing.new
+local v2                    = Vector2.new
+local v3                    = Vector3.new
+local cf                    = CFrame.new
+local c3                    = Color3.new
+local c3fromHSV             = Color3.fromHSV
+local rcParamsNew           = RaycastParams.new
+local abs, tan, rad         = math.abs, math.tan, math.rad
+local clamp, floor          = math.clamp, math.floor
+local tFind, tInsert        = table.find, table.insert
+local inf                   = math.huge
+
+local emptyCF               = cf()
+local pointToObj            = emptyCF.PointToObjectSpace
+local getComps              = emptyCF.GetComponents
+local v3Cross               = v3().Cross
+
+-- Services
+local Workspace        = cloneref(getService(game,"Workspace"))
+local RunService       = cloneref(getService(game,"RunService"))
+local Players          = cloneref(getService(game,"Players"))
+local CoreGui          = cloneref(getService(game,"CoreGui"))
+local UserInputService = cloneref(getService(game,"UserInputService"))
+
+-- Cache
+local cam          = Workspace.CurrentCamera
+local localPlayer  = Players.LocalPlayer
+local screenGui    = instanceNew("ScreenGui", CoreGui)
+screenGui.Name     = "ESP_ScreenGui"
+local lastFov, lastScale
+
+local wtvp = cam.WorldToViewportPoint   -- bound method
+
+-- ──────────────────────────────────────────────────────────────────────────────
+-- Utility helpers
+-- ──────────────────────────────────────────────────────────────────────────────
+local function isDrawingType(t)
+    return t=="Square" or t=="Text" or t=="Triangle" or t=="Image"
+        or t=="Line"   or t=="Circle" or t=="Quad"
+end
+
+local function create(t, props)
+    local isD   = isDrawingType(t)
+    local obj   = isD and drawingNew(t) or instanceNew(t)
+    if props then
+        for k,v in next, props do obj[k] = v end
+    end
+    if not isD then tInsert(espLibrary.instances, obj) end
+    return obj
+end
+
+local function w2vp(pos)
+    local sp, onScreen = wtvp(cam, pos)
+    return v2(sp.X, sp.Y), onScreen, sp.Z
+end
+
+local function round(n)
+    if typeof(n) == "Vector2" then
+        return v2(floor(n.X), floor(n.Y))
+    end
+    return floor(n)
+end
+
+-- Gradient health color: green(1) → yellow(0.5) → red(0)
+local function healthColor(pct)
+    return c3fromHSV(pct * 0.333, 1, 1)
+end
+
+-- ──────────────────────────────────────────────────────────────────────────────
+-- Core library methods
+-- ──────────────────────────────────────────────────────────────────────────────
+function espLibrary.getTeam(player)
+    local team = player.Team
+    return team, player.TeamColor.Color
+end
+
+function espLibrary.getCharacter(player)
+    local char = player.Character
+    if not char then return nil, nil end
+    local torso = char:FindFirstChild("HumanoidRootPart")
+               or char:FindFirstChild("UpperTorso")
+               or char:FindFirstChild("Torso")
+    return char, torso
+end
+
+function espLibrary.getTool(player)
+    local char = player.Character
+    if not char then return "None" end
+    local tool = char:FindFirstChildOfClass("Tool")
+    return tool and tostring(tool) or "None"
+end
+
+function espLibrary.getHealth(player, character)
+    local hum = character:FindFirstChild("Humanoid")
+    if hum then
+        return floor(hum.Health), hum.MaxHealth
+    end
+    return 100, 100
+end
+
+function espLibrary.getScaleFactor(fov, depth)
+    if fov ~= lastFov then
+        lastScale = tan(rad(fov * 0.5)) * 2
+        lastFov   = fov
+    end
+    return 1 / (depth * lastScale) * 1000
+end
+
+function espLibrary.getBoundingBox(character, torso)
+    if espLibrary.options.boundingBox then
+        local minX,minY,minZ =  inf, inf, inf
+        local maxX,maxY,maxZ = -inf,-inf,-inf
+        local iter = espLibrary.options.boundingBoxDescending
+                     and character:GetDescendants() or character:GetChildren()
+        for _, part in next, iter do
+            if part:IsA("BasePart") and not tFind(espLibrary.options.excludedPartNames, part.Name) then
+                local sz  = part.Size
+                local sx,sy,sz2 = sz.X, sz.Y, sz.Z
+                local x,y,z,r00,r01,r02,r10,r11,r12,r20,r21,r22 = getComps(part.CFrame)
+                local wx = 0.5*(abs(r00)*sx+abs(r01)*sy+abs(r02)*sz2)
+                local wy = 0.5*(abs(r10)*sx+abs(r11)*sy+abs(r12)*sz2)
+                local wz = 0.5*(abs(r20)*sx+abs(r21)*sy+abs(r22)*sz2)
+                minX = math.min(minX, x-wx); maxX = math.max(maxX, x+wx)
+                minY = math.min(minY, y-wy); maxY = math.max(maxY, y+wy)
+                minZ = math.min(minZ, z-wz); maxZ = math.max(maxZ, z+wz)
+            end
+        end
+        local oMin = v3(minX,minY,minZ); local oMax = v3(maxX,maxY,maxZ)
+        return (oMax+oMin)*0.5, oMax-oMin
+    end
+    return torso.Position, v2(espLibrary.options.scaleFactorX, espLibrary.options.scaleFactorY)
+end
+
+function espLibrary.getBoxData(position, size)
+    local sp, onScreen, depth = w2vp(position)
+    local scale  = espLibrary.getScaleFactor(cam.FieldOfView, depth)
+    local cx     = clamp(size.X, espLibrary.options.minScaleFactorX, espLibrary.options.maxScaleFactorX)
+    local cy     = clamp(size.Y, espLibrary.options.minScaleFactorY, espLibrary.options.maxScaleFactorY)
+    local sz     = round(v2(cx*scale, cy*scale))
+    return onScreen, sz, round(v2(sp.X - sz.X*0.5, sp.Y - sz.Y*0.5)), sp
+end
+
+function espLibrary.visibleCheck(character, position)
+    local origin = cam.CFrame.Position
+    local params = rcParamsNew()
+    params.FilterDescendantsInstances = { espLibrary.getCharacter(localPlayer), cam, character }
+    params.FilterType  = Enum.RaycastFilterType.Blacklist
+    params.IgnoreWater = true
+    return not Workspace:Raycast(origin, position - origin, params)
+end
+
+-- ──────────────────────────────────────────────────────────────────────────────
+-- Drawing object factories
+-- ──────────────────────────────────────────────────────────────────────────────
+local function makeText(extra)
+    return create("Text", {
+        Center       = true,
+        Size         = 13,
+        Outline      = true,
+        OutlineColor = c3(),
+        Font         = 2,
+    })
+end
+
+local function makeLine(thickness)
+    return create("Line", { Thickness = thickness or 1 })
+end
+
+local function makeSquare(thickness, filled)
+    return create("Square", { Thickness = thickness or 1, Filled = filled or false })
+end
+
+local function makeTriangle(thickness)
+    return create("Triangle", { Thickness = thickness or 1 })
+end
+
+-- Build the list of corner-box quads (8 lines total: 4 corners × 2 lines)
+local function makeCornerBox()
+    local t = {}
+    for i = 1, 8 do t[i] = makeLine(1) end
+    return t
+end
+
+-- ──────────────────────────────────────────────────────────────────────────────
+-- Corner-box draw helper
+-- ──────────────────────────────────────────────────────────────────────────────
+local function drawCornerBox(lines, pos, sz, color, transparency, visible)
+    local x,y  = pos.X, pos.Y
+    local w,h  = sz.X, sz.Y
+    local L    = espLibrary.options.cornerBoxLength
+
+    -- corners: TL, TR, BL, BR — each has H + V line
+    local corners = {
+        { v2(x,y),       v2(x+L,y),     v2(x,y),     v2(x,y+L)   },  -- TL
+        { v2(x+w,y),     v2(x+w-L,y),   v2(x+w,y),   v2(x+w,y+L) },  -- TR
+        { v2(x,y+h),     v2(x+L,y+h),   v2(x,y+h),   v2(x,y+h-L) },  -- BL
+        { v2(x+w,y+h),   v2(x+w-L,y+h), v2(x+w,y+h), v2(x+w,y+h-L)}, -- BR
+    }
+
+    for i, c in ipairs(corners) do
+        local hLine = lines[(i-1)*2+1]
+        local vLine = lines[(i-1)*2+2]
+        hLine.From  = c[1]; hLine.To   = c[2]
+        vLine.From  = c[3]; vLine.To   = c[4]
+        hLine.Color = color; hLine.Transparency = transparency; hLine.Visible = visible
+        vLine.Color = color; vLine.Transparency = transparency; vLine.Visible = visible
+    end
+end
+
+-- ──────────────────────────────────────────────────────────────────────────────
+-- ESP add / remove
+-- ──────────────────────────────────────────────────────────────────────────────
+function espLibrary.addEsp(player)
+    if player == localPlayer then return end
+
+    local objects = {
+        -- arrows
+        arrow        = makeTriangle(1),
+        arrowOutline = makeTriangle(2),
+        -- labels
+        nameText     = makeText(),
+        distText     = makeText(),
+        healthText   = makeText(),
+        toolText     = makeText(),
+        -- standard box
+        box          = makeSquare(1),
+        boxOutline   = makeSquare(3),
+        boxFill      = makeSquare(1, true),
+        -- corner box (8 lines)
+        cornerLines  = makeCornerBox(),
+        -- health bar
+        healthBar    = makeSquare(1, true),
+        healthBarBg  = makeSquare(1, true),
+        -- tracer
+        tracer       = makeLine(1),
+        tracerOutline= makeLine(3),
+        -- skeleton lines (R6 + R15 combined)
+        skeletonLines = {},
+    }
+
+    -- 11 skeleton lines max
+    for i = 1, 11 do
+        objects.skeletonLines[i] = makeLine(1)
+    end
+
+    espLibrary.espCache[player] = objects
+
+    -- Death + respawn connections
+    local function connectDeath(char)
+        local hum = char:FindFirstChildOfClass("Humanoid")
+              or char:WaitForChild("Humanoid", 5)
+        if hum then
+            hum.Died:Connect(function()
+                -- hide everything
+                for _, obj in next, objects.cornerLines do obj.Visible = false end
+                for _, obj in next, objects.skeletonLines do obj.Visible = false end
+                objects.box.Visible         = false
+                objects.boxOutline.Visible  = false
+                objects.boxFill.Visible     = false
+                objects.nameText.Visible    = false
+                objects.distText.Visible    = false
+                objects.healthText.Visible  = false
+                objects.toolText.Visible    = false
+                objects.healthBar.Visible   = false
+                objects.healthBarBg.Visible = false
+                objects.tracer.Visible      = false
+                objects.tracerOutline.Visible = false
+                objects.arrow.Visible       = false
+                objects.arrowOutline.Visible= false
+            end)
+        end
+    end
+
+    local char = player.Character
+    if char then connectDeath(char) end
+    player.CharacterAdded:Connect(function(c) connectDeath(c) end)
+end
+
+function espLibrary.removeEsp(player)
+    local cache = espLibrary.espCache[player]
+    if not cache then return end
+    espLibrary.espCache[player] = nil
+    for _, obj in next, cache.cornerLines  do obj:Remove() end
+    for _, obj in next, cache.skeletonLines do obj:Remove() end
+    -- remove rest
+    local plain = {"arrow","arrowOutline","nameText","distText","healthText",
+                   "toolText","box","boxOutline","boxFill","healthBar",
+                   "healthBarBg","tracer","tracerOutline"}
+    for _, k in ipairs(plain) do
+        if cache[k] then cache[k]:Remove() end
+    end
+end
+
+function espLibrary.addChams(player)
+    if player == localPlayer then return end
+    local hl = create("Highlight", { Parent = screenGui })
+    espLibrary.chamsCache[player] = hl
+end
+
+function espLibrary.removeChams(player)
+    local hl = espLibrary.chamsCache[player]
+    if hl then
+        espLibrary.chamsCache[player] = nil
+        hl:Destroy()
+    end
+end
+
+function espLibrary.addObject(object, options)
+    espLibrary.objectCache[object] = {
+        options = options,
+        text    = makeText()
+    }
+end
+
+function espLibrary.removeObject(object)
+    local cache = espLibrary.objectCache[object]
+    if cache then
+        espLibrary.objectCache[object] = nil
+        cache.text:Remove()
+    end
+end
+
+-- ──────────────────────────────────────────────────────────────────────────────
+-- Public API helpers
+-- ──────────────────────────────────────────────────────────────────────────────
+function espLibrary:AddObjectEsp(object, defaultOptions)
+    assert(object and object.Parent, "invalid object")
+    local options = defaultOptions or {}
+    options.enabled      = options.enabled      or true
+    options.limitDistance= options.limitDistance or false
+    options.maxDistance  = options.maxDistance   or 1000
+    options.visibleOnly  = options.visibleOnly   or false
+    options.color        = options.color         or c3(1,1,1)
+    options.transparency = options.transparency  or 0
+    options.text         = options.text          or object.Name
+    options.font         = options.font          or 2
+    options.fontSize     = options.fontSize      or 13
+    self.addObject(object, options)
+    tInsert(self.conns, object.Parent.ChildRemoved:Connect(function(child)
+        if child == object then self.removeObject(child) end
+    end))
+    return options
+end
+
+function espLibrary:Unload()
+    for _, conn in next, self.conns do conn:Disconnect() end
+    for _, p in next, Players:GetPlayers() do
+        self.removeEsp(p); self.removeChams(p)
+    end
+    for obj in next, self.objectCache do self.removeObject(obj) end
+    for _, obj in next, self.instances do
+        if obj and obj.Parent then obj:Destroy() end
+    end
+    screenGui:Destroy()
+    RunService:UnbindFromRenderStep("esp_v2_render")
+end
+
+-- ──────────────────────────────────────────────────────────────────────────────
+-- Skeleton rendering
+-- ──────────────────────────────────────────────────────────────────────────────
+local SKELETON_R6 = {
+    {"Head","Torso"},
+    {"Torso","Left Arm"},  {"Torso","Right Arm"},
+    {"Torso","Left Leg"},  {"Torso","Right Leg"},
+}
+local SKELETON_R15 = {
+    {"Head","UpperTorso"},
+    {"UpperTorso","LowerTorso"},
+    {"UpperTorso","LeftUpperArm"},  {"LeftUpperArm","LeftLowerArm"},
+    {"UpperTorso","RightUpperArm"}, {"RightUpperArm","RightLowerArm"},
+    {"LowerTorso","LeftUpperLeg"},  {"LeftUpperLeg","LeftLowerLeg"},
+    {"LowerTorso","RightUpperLeg"}, {"RightUpperLeg","RightLowerLeg"},
+}
+
+local function updateSkeleton(character, objects, show, opts)
+    local lines = objects.skeletonLines
+    if not show or not opts.skeleton then
+        for i = 1, #lines do lines[i].Visible = false end
+        return
+    end
+
+    local hum = character:FindFirstChildOfClass("Humanoid")
+    if not hum then
+        for i = 1, #lines do lines[i].Visible = false end
+        return
+    end
+
+    local schema = hum.RigType == Enum.HumanoidRigType.R6 and SKELETON_R6 or SKELETON_R15
+    local color  = opts.skeletonColor
+    local transp = opts.skeletonTransparency
+
+    for i = 1, #lines do
+        local pair = schema[i]
+        if pair then
+            local pA = character:FindFirstChild(pair[1])
+            local pB = character:FindFirstChild(pair[2])
+            if pA and pB then
+                local sA = w2vp(pA.Position)
+                local sB = w2vp(pB.Position)
+                lines[i].From         = sA
+                lines[i].To           = sB
+                lines[i].Color        = color
+                lines[i].Transparency = transp
+                lines[i].Visible      = true
+            else
+                lines[i].Visible = false
+            end
+        else
+            lines[i].Visible = false
+        end
+    end
+end
+
+-- ──────────────────────────────────────────────────────────────────────────────
+-- Main render loop
+-- ──────────────────────────────────────────────────────────────────────────────
+function espLibrary:Load(renderPriority)
+    tInsert(self.conns, Players.PlayerAdded:Connect(function(p)
+        self.addEsp(p); self.addChams(p)
+    end))
+    tInsert(self.conns, Players.PlayerRemoving:Connect(function(p)
+        self.removeEsp(p); self.removeChams(p)
+    end))
+
+    for _, p in next, Players:GetPlayers() do
+        self.addEsp(p); self.addChams(p)
+    end
+
+    RunService:BindToRenderStep("esp_v2_render",
+        renderPriority or (Enum.RenderPriority.Camera.Value + 1),
+    function()
+        cam = Workspace.CurrentCamera   -- refresh in case of cam change
+        local opts    = self.options
+        local vpSize  = cam.ViewportSize
+        local camCF   = cam.CFrame
+        local camPos  = camCF.Position
+        local fov     = cam.FieldOfView
+        local center  = v2(vpSize.X * 0.5, vpSize.Y * 0.5)
+
+        -- ── Player ESP ──────────────────────────────────────────────────────
+        for player, objects in next, self.espCache do
+            local char, torso = self.getCharacter(player)
+
+            if char and torso then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if not hum or hum.Health <= 0 then
+                    -- dead — hide all and skip
+                    objects.box.Visible      = false
+                    objects.nameText.Visible = false
+                    objects.arrow.Visible    = false
+                    for _, l in next, objects.skeletonLines do l.Visible = false end
+                    for _, l in next, objects.cornerLines   do l.Visible = false end
+                    continue
+                end
+
+                local onScreen, sz, pos, torsoSP = self.getBoxData(torso.Position, v3(5, 6.5))
+                local dist     = (camPos - torso.Position).Magnitude
+                local team, teamColor = self.getTeam(player)
+                local health, maxHealth = self.getHealth(player, char)
+                local hpPct    = health / maxHealth
+
+                -- resolve color
+                local color = opts.teamColor and teamColor or nil
+                if opts.useCustomTeamColor and opts.teamColor then color = opts.customTeamColor end
+                if opts.fillColor ~= nil then color = opts.fillColor end
+                if tFind(self.whitelist, player.Name) then color = opts.whitelistColor end
+
+                -- check enabled
+                local enabled = opts.enabled
+                if tFind(self.blacklist, player.Name)                          then enabled = false end
+                if opts.limitDistance and dist > opts.maxDistance              then enabled = false end
+                if opts.visibleOnly and not self.visibleCheck(char, torso.Position) then enabled = false end
+                if opts.teamCheck and team == self.getTeam(localPlayer)        then enabled = false end
+
+                local canShow = onScreen and (sz and pos)
+                local show    = canShow and enabled
+
+                -- ── Out-of-view arrows ──
+                local objSP  = pointToObj(camCF, torso.Position)
+                local flat   = v3(objSP.X, 0, objSP.Z).Unit
+                local aCross = v3Cross(flat, v3(0,1,0))
+                local right  = v2(aCross.X, aCross.Z)
+                local aDir   = v2(flat.X, flat.Z)
+                local aPos   = center + aDir * opts.outOfViewArrowsRadius
+                local aSz    = opts.outOfViewArrowsSize
+                local aUnit  = (aPos - center).Unit
+                local pA     = aPos
+                local pB     = center + aUnit*(opts.outOfViewArrowsRadius - aSz) + right*aSz
+                local pC     = center + aUnit*(opts.outOfViewArrowsRadius - aSz) - right*aSz
+
+                local arrowVis = (not canShow) and enabled and opts.outOfViewArrows
+
+                objects.arrow.Visible      = arrowVis
+                objects.arrow.Filled       = opts.outOfViewArrowsFilled
+                objects.arrow.Transparency = opts.outOfViewArrowsTransparency
+                objects.arrow.Color        = color or opts.outOfViewArrowsColor
+                objects.arrow.PointA = pA; objects.arrow.PointB = pB; objects.arrow.PointC = pC
+
+                objects.arrowOutline.Visible      = arrowVis and opts.outOfViewArrowsOutline
+                objects.arrowOutline.Filled       = opts.outOfViewArrowsOutlineFilled
+                objects.arrowOutline.Transparency = opts.outOfViewArrowsOutlineTransp
+                objects.arrowOutline.Color        = opts.outOfViewArrowsOutlineColor
+                objects.arrowOutline.PointA = pA; objects.arrowOutline.PointB = pB; objects.arrowOutline.PointC = pC
+
+                -- ── Name ──
+                objects.nameText.Visible      = show and opts.names
+                objects.nameText.Font         = opts.font
+                objects.nameText.Size         = opts.fontSize
+                objects.nameText.Transparency = opts.nameTransparency
+                objects.nameText.Color        = color or opts.nameColor
+                objects.nameText.Text         = player.DisplayName ~= player.Name
+                                                and ("[" .. player.Name .. "] " .. player.DisplayName)
+                                                or player.Name
+                objects.nameText.Position     = round(pos + v2(sz.X*0.5, -(objects.nameText.TextBounds.Y + 3)))
+
+                -- ── Health bar ──
+                local barH    = round(v2(opts.healthBarsSize, -(sz.Y * hpPct)))
+                local barPos  = round(v2(pos.X - (3 + barH.X), pos.Y + sz.Y))
+                local hpColor = opts.healthGradient and healthColor(hpPct) or opts.healthBarsColor or c3(0,1,0)
+
+                objects.healthBarBg.Visible     = show and opts.healthBars
+                objects.healthBarBg.Color       = c3()
+                objects.healthBarBg.Transparency= opts.healthBarsTransparency
+                objects.healthBarBg.Size        = round(v2(barH.X, -sz.Y) + v2(2,-2))
+                objects.healthBarBg.Position    = barPos - v2(1,-1)
+
+                objects.healthBar.Visible       = show and opts.healthBars
+                objects.healthBar.Color         = hpColor
+                objects.healthBar.Transparency  = opts.healthBarsTransparency
+                objects.healthBar.Size          = barH
+                objects.healthBar.Position      = barPos
+
+                -- ── Health label ──
+                objects.healthText.Visible      = show and opts.healthText
+                objects.healthText.Font         = opts.font
+                objects.healthText.Size         = opts.fontSize
+                objects.healthText.Transparency = opts.healthTextTransparency
+                objects.healthText.Color        = color or opts.healthTextColor
+                objects.healthText.Text         = health .. opts.healthTextSuffix
+                objects.healthText.Position     = round(pos + v2(sz.X + 4, -3))
+
+                -- ── Tool label ──
+                local tool    = self.getTool(player)
+                local toolVis = show and opts.tool and tool ~= "None"
+                objects.toolText.Visible      = toolVis
+                objects.toolText.Font         = opts.font
+                objects.toolText.Size         = opts.fontSize
+                objects.toolText.Transparency = opts.toolTransparency
+                objects.toolText.Color        = color or opts.toolColor
+                objects.toolText.Text         = "🔧 " .. tool
+                objects.toolText.Position     = round(pos + v2(sz.X*0.5, sz.Y + 1))
+
+                -- ── Distance label ──
+                local distOff = toolVis and 14 or 2
+                objects.distText.Visible      = show and opts.distance
+                objects.distText.Font         = opts.font
+                objects.distText.Size         = opts.fontSize
+                objects.distText.Transparency = opts.distanceTransparency
+                objects.distText.Color        = color or opts.distanceColor
+                objects.distText.Text         = tostring(round(dist)) .. opts.distanceSuffix
+                objects.distText.Position     = round(pos + v2(sz.X*0.5, sz.Y + distOff))
+
+                -- ── Boxes ──
+                local boxColor  = color or opts.boxesColor
+                local boxTransp = opts.boxesTransparency
+
+                -- Standard box
+                objects.box.Visible      = show and opts.boxes and not opts.cornerBox
+                objects.box.Color        = boxColor
+                objects.box.Transparency = boxTransp
+                objects.box.Size         = sz
+                objects.box.Position     = pos
+
+                objects.boxOutline.Visible      = show and opts.boxes and not opts.cornerBox
+                objects.boxOutline.Transparency = boxTransp
+                objects.boxOutline.Size         = sz
+                objects.boxOutline.Position     = pos
+
+                -- Corner box
+                if show and opts.boxes and opts.cornerBox then
+                    drawCornerBox(objects.cornerLines, pos, sz, boxColor, boxTransp, true)
+                else
+                    for _, l in next, objects.cornerLines do l.Visible = false end
+                end
+
+                -- Box fill
+                objects.boxFill.Visible      = show and opts.boxFill
+                objects.boxFill.Color        = color or opts.boxFillColor
+                objects.boxFill.Transparency = opts.boxFillTransparency
+                objects.boxFill.Size         = sz
+                objects.boxFill.Position     = pos
+
+                -- ── Tracers ──
+                local origin = opts.tracerOrigin
+                local fromPos = origin == "Mouse"  and UserInputService:GetMouseLocation()
+                             or origin == "Top"    and v2(vpSize.X*0.5, 0)
+                             or                        v2(vpSize.X*0.5, vpSize.Y)
+
+                objects.tracer.Visible        = show and opts.tracers
+                objects.tracer.Color          = color or opts.tracerColor
+                objects.tracer.Transparency   = opts.tracerTransparency
+                objects.tracer.From           = fromPos
+                objects.tracer.To             = torsoSP
+
+                objects.tracerOutline.Visible      = show and opts.tracers
+                objects.tracerOutline.Color        = c3()
+                objects.tracerOutline.Transparency = opts.tracerTransparency
+                objects.tracerOutline.From         = fromPos
+                objects.tracerOutline.To           = torsoSP
+
+                -- ── Skeleton ──
+                updateSkeleton(char, objects, show, opts)
+
+            else
+                -- character not loaded — hide everything
+                for _, l in next, objects.cornerLines   do l.Visible = false end
+                for _, l in next, objects.skeletonLines do l.Visible = false end
+                objects.box.Visible         = false
+                objects.boxOutline.Visible  = false
+                objects.boxFill.Visible     = false
+                objects.nameText.Visible    = false
+                objects.distText.Visible    = false
+                objects.healthText.Visible  = false
+                objects.toolText.Visible    = false
+                objects.healthBar.Visible   = false
+                objects.healthBarBg.Visible = false
+                objects.tracer.Visible      = false
+                objects.tracerOutline.Visible = false
+                objects.arrow.Visible       = false
+                objects.arrowOutline.Visible= false
+            end
+        end
+
+        -- ── Chams ───────────────────────────────────────────────────────────
+        for player, hl in next, self.chamsCache do
+            local char, torso = self.getCharacter(player)
+            if char and torso then
+                local dist = (camPos - torso.Position).Magnitude
+                local team, teamColor = self.getTeam(player)
+                local enabled = opts.enabled and opts.chams
+                local color   = opts.teamColor and teamColor or nil
+                if opts.useCustomTeamColor and opts.teamColor then color = opts.customTeamColor end
+                if opts.fillColor ~= nil then color = opts.fillColor end
+                if tFind(self.whitelist, player.Name) then color = opts.whitelistColor end
+                if tFind(self.blacklist, player.Name) then enabled = false end
+                if opts.limitDistance and dist > opts.maxDistance then enabled = false end
+                if opts.teamCheck and team == self.getTeam(localPlayer) then enabled = false end
+
+                hl.Enabled             = enabled
+                hl.DepthMode           = opts.visibleOnly
+                                         and Enum.HighlightDepthMode.Occluded
+                                         or  Enum.HighlightDepthMode.AlwaysOnTop
+                hl.Adornee             = char
+                hl.FillColor           = color or opts.chamsFillColor
+                hl.FillTransparency    = opts.chamsFillTransparency
+                hl.OutlineColor        = color or opts.chamsOutlineColor
+                hl.OutlineTransparency = opts.chamsOutlineTransparency
+            end
+        end
+
+        -- ── Object ESP ──────────────────────────────────────────────────────
+        for object, cache in next, self.objectCache do
+            local partPos = v3()
+            if object:IsA("BasePart")  then partPos = object.Position
+            elseif object:IsA("Model") then partPos = self.getBoundingBox(object) end
+            local dist     = (camPos - partPos).Magnitude
+            local sp, onScreen = w2vp(partPos)
+            local canShow  = cache.options.enabled and onScreen
+            if opts.limitDistance and dist > opts.maxDistance then canShow = false end
+            if opts.visibleOnly and not self.visibleCheck(object, partPos) then canShow = false end
+            cache.text.Visible      = canShow
+            cache.text.Font         = cache.options.font
+            cache.text.Size         = cache.options.fontSize
+            cache.text.Transparency = cache.options.transparency
+            cache.text.Color        = cache.options.color
+            cache.text.Text         = cache.options.text
+            cache.text.Position     = round(sp)
+        end
+    end)
+end
+
+return espLibrary
